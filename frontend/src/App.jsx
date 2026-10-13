@@ -29,6 +29,10 @@ function App() {
   const [pipelineSettings, setPipelineSettings] = useState({ confidence_threshold: 0.4, z_threshold: 2.5 });
   const [detectionEvent, setDetectionEvent] = useState(null);
   const [sirenMuted, setSirenMuted] = useState(false);
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState(null);
+  const [imageResult, setImageResult] = useState(null);
+  const [imageAnalyzing, setImageAnalyzing] = useState(false);
 
   useEffect(() => onAuthStateChanged(auth, (u) => { setUser(u); setCheckingAuth(false); }), []);
   useEffect(() => {
@@ -45,14 +49,20 @@ function App() {
     img.onload = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      const scaleX = canvas.width / img.width;
+      const scaleY = canvas.height / img.height;
+
       ctx.strokeStyle = "#4ade80";
       ctx.lineWidth = 2;
       ctx.font = "13px sans-serif";
       ctx.fillStyle = "#4ade80";
       data.tracks.forEach((t) => {
         const [x1, y1, x2, y2] = t.bbox;
-        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-        ctx.fillText(`ID ${t.id}`, x1, y1 - 5);
+        const sx1 = x1 * scaleX, sy1 = y1 * scaleY;
+        const sx2 = x2 * scaleX, sy2 = y2 * scaleY;
+        ctx.strokeRect(sx1, sy1, sx2 - sx1, sy2 - sy1);
+        ctx.fillText(`ID ${t.id}`, sx1, sy1 - 5);
       });
     };
     img.src = `data:image/jpeg;base64,${data.frame}`;
@@ -157,6 +167,7 @@ function App() {
 
   const NAV_ITEMS = [
     { id: "monitor", label: "Monitor", icon: "◎" },
+    { id: "image", label: "Image Analysis", icon: "🖼" },
     { id: "reports", label: "Reports", icon: "▤" },
     { id: "settings", label: "Settings", icon: "⚙" },
   ];
@@ -286,6 +297,8 @@ function App() {
           </div>
         )}
 
+        {activeView === "image" && <ImageAnalysisPanel />}
+
         {activeView === "settings" && (
           <div className="max-w-md space-y-6">
             <div>
@@ -386,6 +399,93 @@ function ReportsPanel() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function ImageAnalysisPanel() {
+  const [imageFile, setImageFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [result, setResult] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImageFile(file);
+    setPreviewUrl(URL.createObjectURL(file));
+    setResult(null);
+  };
+
+  const analyze = async () => {
+    if (!imageFile) return;
+    setAnalyzing(true);
+    const formData = new FormData();
+    formData.append("file", imageFile);
+    try {
+      const res = await fetch(`${API_BASE}/analyze-image`, { method: "POST", body: formData });
+      const data = await res.json();
+      setResult(data);
+    } catch (e) {
+      setResult({ error: "Analysis failed. Check backend connection." });
+    }
+    setAnalyzing(false);
+  };
+
+  const LEVEL_STYLES = {
+    LOW: { bg: "bg-green-500/10", text: "text-green-400", ring: "ring-green-500/40" },
+    MODERATE: { bg: "bg-orange-500/10", text: "text-orange-400", ring: "ring-orange-500/50" },
+    HIGH: { bg: "bg-red-500/10", text: "text-red-400", ring: "ring-red-500/60" },
+  };
+
+  return (
+    <div className="max-w-3xl">
+      <h2 className="text-xl font-bold mb-1">Image Crowd Density Analysis</h2>
+      <p className="text-sm text-neutral-500 mb-4">
+        Upload a single photo to estimate crowd density via a density-map model (CSRNet).
+        This mode estimates headcount and crowding only — it cannot assess movement or
+        behavior, which require video.
+      </p>
+
+      <div className="bg-neutral-900/60 border border-neutral-800 rounded-xl p-4 space-y-3 mb-4">
+        <input type="file" accept="image/*" onChange={handleFileChange}
+          className="text-xs w-full text-neutral-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-neutral-800 file:text-white file:text-xs" />
+        <button onClick={analyze} disabled={!imageFile || analyzing}
+          className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-800 disabled:text-neutral-600 rounded-md py-2 text-sm font-semibold transition">
+          {analyzing ? "Analyzing..." : "Analyze Image"}
+        </button>
+      </div>
+
+      {previewUrl && !result && (
+        <img src={previewUrl} alt="preview" className="rounded-xl border border-neutral-800 max-h-96 w-auto" />
+      )}
+
+      {result && result.error && (
+        <p className="text-red-400 text-sm">{result.error}</p>
+      )}
+
+      {result && !result.error && (
+        <div className="space-y-4">
+          <div className={`rounded-xl overflow-hidden border ${LEVEL_STYLES[result.density_level]?.ring ? "ring-1 " + LEVEL_STYLES[result.density_level].ring : "border-neutral-800"}`}>
+            <img src={`data:image/jpeg;base64,${result.annotated_image}`} alt="density heatmap" className="w-full h-auto block" />
+          </div>
+          <p className="text-xs text-neutral-500 -mt-2">
+            Heatmap shows estimated crowd density — warmer colors indicate higher concentration.
+          </p>
+
+          <div className={`rounded-xl border border-neutral-800 ${LEVEL_STYLES[result.density_level]?.bg} px-5 py-4 ring-1 ${LEVEL_STYLES[result.density_level]?.ring}`}>
+            <p className={`text-lg font-bold ${LEVEL_STYLES[result.density_level]?.text}`}>
+              {result.density_level} density
+            </p>
+            <p className="text-xs text-neutral-500 mt-1">Method: Density-map estimation (CSRNet)</p>
+          </div>
+
+          <div className="bg-neutral-900/60 border border-neutral-800 rounded-lg px-4 py-3">
+            <p className="text-xs text-neutral-500 mb-1">Estimated people count</p>
+            <p className="text-lg font-semibold">{result.people_count}</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

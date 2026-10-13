@@ -16,6 +16,11 @@ from alert_config import alert_settings
 import json
 from fastapi.responses import Response
 from report_pdf import generate_report_pdf
+from frame_grabber import LatestFrameReader
+import numpy as np
+from image_analyzer import ImageAnalyzer
+
+image_pipeline = ImageAnalyzer()
 
 app = FastAPI(title="CrowdPulse API")
 
@@ -61,12 +66,18 @@ async def stream(websocket: WebSocket):
     else:  # "file"
         source = str(UPLOAD_DIR / config_msg["filename"])
 
-    pipeline = StampedePipeline()
-    cap = cv2.VideoCapture(source)
+    if source_type in ("webcam", "ip_webcam"):
+        cap = LatestFrameReader(source)
+    else:
+        cap = cv2.VideoCapture(source)
+
     if not cap.isOpened():
         await websocket.send_json({"type": "log", "event": "error", "message": f"Could not open source: {source_type}", "timestamp": time.strftime("%X")})
         await websocket.close()
         return
+
+    pipeline = StampedePipeline()
+
     last_event_type = None
     last_alert_time = 0
     alert_count = 0
@@ -88,12 +99,19 @@ async def stream(websocket: WebSocket):
         return {"type": "log", "event": event_type, "message": message, "timestamp": time.strftime("%X")}
 
     try:
+        target_interval = 1 / settings.target_fps
+
         while True:
+            loop_start = time.time()
             ret, frame = cap.read()
             if not ret:
                 await websocket.send_json(make_log("info", "Stream ended (video finished)"))
                 break
-            output = pipeline.process_frame(frame)
+            if frame is None:
+                await asyncio.sleep(0.01)
+                continue
+
+            output = await asyncio.to_thread(pipeline.process_frame, frame)
 
             now = time.time()
             dt = now - last_frame_time
@@ -127,7 +145,7 @@ async def stream(websocket: WebSocket):
                             session_stats["alert_events"].append({"time": time.strftime("%X"), "message": alert_msg})
                             try:
                                 send_sms_alert(alert_msg)
-                                send_email_alert("StampedeShield Alert", alert_msg)
+                                send_email_alert("CrowdPulse Alert", alert_msg)
                             except Exception as e:
                                 await websocket.send_json(make_log("error", f"Alert send failed: {e}"))
                             alert_count += 1
@@ -148,7 +166,9 @@ async def stream(websocket: WebSocket):
                 "risk": output["risk"],
             }
             await websocket.send_json(payload)
-            await asyncio.sleep(1 / 15)
+
+            elapsed = time.time() - loop_start
+            await asyncio.sleep(max(0, target_interval - elapsed))
     except WebSocketDisconnect:
         pass
     finally:
@@ -223,3 +243,14 @@ def download_report_pdf(index: int):
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=stampedeshield_report_{index}.pdf"}
     )
+
+@app.post("/analyze-image")
+async def analyze_image(file: UploadFile = File(...)):
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return {"error": "Could not decode image"}
+
+    result = image_pipeline.analyze(frame)
+    return result
