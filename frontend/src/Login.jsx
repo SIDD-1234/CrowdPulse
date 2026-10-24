@@ -29,7 +29,7 @@ function Login({ onLogin }) {
         onSubmit={handleSubmit}
         className="bg-neutral-900 rounded-lg p-8 w-80 space-y-4"
       >
-        <h1 className="text-xl font-bold text-white text-center">StampedeShield</h1>
+        <h1 className="text-xl font-bold text-white text-center">Crowd Pulse</h1>
         <input
           type="email"
           placeholder="Email"
